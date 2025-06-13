@@ -3,12 +3,15 @@
 use std::{
     cell::RefCell,
     env,
+    fs::File,
+    io::Read,
     thread::{self, sleep},
     time::Duration,
 };
 
 use native_windows_derive as nwd;
 use native_windows_gui as nwg;
+use sha2::{Digest, Sha256};
 
 use nwd::NwgUi;
 use nwg::NativeUi;
@@ -45,19 +48,28 @@ impl BasicApp {
         let sender = self.request_notice.sender();
         *self.request_result.borrow_mut() = Some(thread::spawn(move || {
             let task = || {
-                let upload_form = {
-                    let option = env::args().nth(1).and_then(|p| {
-                        reqwest::blocking::multipart::Form::new()
-                            .file("file", p)
-                            .ok()
-                    });
-
-                    if let Some(form) = option {
-                        form
-                    } else {
-                        return Some(Box::from("the fuck you want"));
-                    }
+                let file_path = match env::args().nth(1) {
+                    Some(path) => path,
+                    None => return Some(Box::from("the fuck you want")),
                 };
+
+                let mut file = match File::open(&file_path) {
+                    Ok(f) => f,
+                    Err(_) => return Some(Box::from("the fuck you want")),
+                };
+
+                let mut hasher = Sha256::new();
+                let mut buffer = [0; 8192];
+
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => hasher.update(&buffer[..n]),
+                        Err(_) => return Some(Box::from("cant read this file bro")),
+                    }
+                }
+
+                let hash = format!("{:x}", hasher.finalize());
 
                 let mut path = env::current_exe().ok()?;
                 path.set_file_name("settings.ini");
@@ -69,48 +81,67 @@ impl BasicApp {
                     .build()
                     .ok()?;
 
-                // Obtain upload url
+                // check if file hash exists in virustotal db
                 let response = client
-                    .get("https://www.virustotal.com/api/v3/files/upload_url")
+                    .get(&format!("https://www.virustotal.com/api/v3/files/{}", hash))
                     .header("accept", "application/json")
                     .header("x-apikey", apikey)
                     .send()
                     .ok()?;
-                let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
-                let upload_url = v.get("data")?.as_str()?;
 
-                // Upload file
-                let response = client
-                    .post(upload_url)
-                    .header("accept", "application/json")
-                    .header("x-apikey", apikey)
-                    .multipart(upload_form)
-                    .send()
-                    .ok()?;
-                let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
-                let analysis_id = v.get("data")?.get("id")?.as_str()?;
+                let response_content = if response.status().is_success() {
+                    serde_json::from_str(&response.text().ok()?).ok()?
+                } else if response.status().as_u16() == 404 {
+                    // file not found, upload it
+                    let upload_form = reqwest::blocking::multipart::Form::new()
+                        .file("file", &file_path)
+                        .ok()?;
 
-                // Get analysis results
-                let response_content = loop {
+                    // get upload URL from virustotal
                     let response = client
-                        .get(format!(
-                            "https://www.virustotal.com/api/v3/analyses/{analysis_id}"
-                        ))
+                        .get("https://www.virustotal.com/api/v3/files/upload_url")
                         .header("accept", "application/json")
                         .header("x-apikey", apikey)
                         .send()
                         .ok()?;
-
-                    if !response.status().is_success() {
-                        return None;
-                    }
-
                     let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
-                    let status = v.get("data")?.get("attributes")?.get("status")?.as_str()?;
-                    if status == "completed" {
-                        break v;
+                    let upload_url = v.get("data")?.as_str()?;
+
+                    // upload file to virustotal
+                    let response = client
+                        .post(upload_url)
+                        .header("accept", "application/json")
+                        .header("x-apikey", apikey)
+                        .multipart(upload_form)
+                        .send()
+                        .ok()?;
+                    let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
+                    let analysis_id = v.get("data")?.get("id")?.as_str()?;
+
+                    // wait for result
+                    loop {
+                        let response = client
+                            .get(format!(
+                                "https://www.virustotal.com/api/v3/analyses/{analysis_id}"
+                            ))
+                            .header("accept", "application/json")
+                            .header("x-apikey", apikey)
+                            .send()
+                            .ok()?;
+
+                        if !response.status().is_success() {
+                            return None;
+                        }
+
+                        let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
+                        let status = v.get("data")?.get("attributes")?.get("status")?.as_str()?;
+                        if status == "completed" {
+                            break v;
+                        }
+                        sleep(Duration::from_secs(1));
                     }
-                    sleep(Duration::from_secs(1));
+                } else {
+                    return None;
                 };
 
                 #[derive(Default)]
@@ -119,11 +150,10 @@ impl BasicApp {
                     bad: u32,
                 }
 
-                // Agregate analysis results
                 let agregate = response_content
                     .get("data")?
                     .get("attributes")?
-                    .get("results")?
+                    .get("last_analysis_results")?
                     .as_object()?
                     .values()
                     .map(|v| {
