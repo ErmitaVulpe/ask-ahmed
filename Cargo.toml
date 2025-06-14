@@ -1,6 +1,6 @@
 [package]
 name = "ask-ahmed"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Tymon Wilczek <tymon.wilczek@gmail.com>"]
@@ -11,6 +11,10 @@ lto = true
 strip = true
 
 [dependencies]
+anyhow = "1.0.98"
+flexi_logger = "0.30.2"
+hex = "0.4.3"
+log = { version = "0.4.27",features = ["release_max_level_info"] }
 native-windows-derive = "1.0.5"
 native-windows-gui = "1.0.13"
 reqwest = { version = "0.12.20", default-features = false, features = [
@@ -23,7 +27,9 @@ reqwest = { version = "0.12.20", default-features = false, features = [
     "system-proxy"
 ]}
 rust-ini = "0.21.1"
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+sha2 = "0.10.9"
 winapi = "0.3"
 
 [build-dependencies]

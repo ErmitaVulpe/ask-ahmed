@@ -17,13 +17,35 @@ Search for `ask-ahmed` and press `Uninstall`
 
 Go to the installation folder (by default `C:\Program Files\ask-ahmed`) and edit the `settings.ini` file
 
+# Compiling
+
+To compile the program yourself, install the Rust compiler toolchain ([available here](https://www.rust-lang.org/tools/install)), and then run the following commands
+```sh
+git clone https://github.com/ErmitaVulpe/ask-ahmed
+cd ask-ahmed
+cargo b -r
+```
+The compiled program will be at `target/release/ask-ahmed.exe`
+
+## Generating the installer
+
+To generate the installer you will need the `Wix toolset v3` which you can download [here](https://github.com/wixtoolset/wix3/releases), and the cargo-wix tool
+```sh
+# To download cargo-wix
+cargo install cargo-wix
+
+# Then to compile
+cargo wix
+```
+The compiled installer will be inside of `target/wix/`
+
 # Showcase
 
-![alt text](https://github.com/ErmitaVulpe/ask-ahmed/blob/master/showcase/context_menu.png "Context menu")  
+![Context menu](https://github.com/ErmitaVulpe/ask-ahmed/blob/master/showcase/context_menu.png "Context menu")  
   
-![alt text](https://github.com/ErmitaVulpe/ask-ahmed/blob/master/showcase/bad.png "Bad")  
+![Bad](https://github.com/ErmitaVulpe/ask-ahmed/blob/master/showcase/bad.png "Bad")  
   
-![alt text](https://github.com/ErmitaVulpe/ask-ahmed/blob/master/showcase/good.png "Good")  
+![Good](https://github.com/ErmitaVulpe/ask-ahmed/blob/master/showcase/good.png "Good")  
 
 # License
 

@@ -80,6 +80,8 @@
         <MajorUpgrade
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'
+            AllowDowngrades="no"
+            AllowSameVersionUpgrades="no"
         />
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
@@ -123,6 +125,20 @@
                         />
                     </Component>
 
+                    <Component Id="LogFileTemplate" Guid="*">
+                        <File
+                            Id='LogFile'
+                            Name='ahmed.log'
+                            Source="wix/ahmed.log"
+                        >
+                            <Permission
+                                User="Everyone"
+                                GenericRead="yes"
+                                GenericWrite="yes"
+                            />
+                        </File>
+                    </Component>
+
                     <Component Id="IniFile" Guid="5746e68d-dc8c-4752-995f-8a3bc2c856f6">
                         <CreateFolder />
                         <IniFile
@@ -147,6 +163,7 @@
             <ComponentRef Id='License'/>
             <ComponentRef Id='binary'/>
             <ComponentRef Id="ContextMenuRegistry"/>
+            <ComponentRef Id="LogFileTemplate"/>
             <ComponentRef Id="IniFile"/>
         </Feature>
 

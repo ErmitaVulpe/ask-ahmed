@@ -2,7 +2,8 @@
 
 use std::{
     cell::RefCell,
-    env,
+    env, fs,
+    io::{self, BufReader, Read, Write},
     thread::{self, sleep},
     time::Duration,
 };
@@ -10,9 +11,13 @@ use std::{
 use native_windows_derive as nwd;
 use native_windows_gui as nwg;
 
+use anyhow::{Context, Error as AnyError, Result as AnyResult};
+use log::{Record, debug, error, info, warn};
 use nwd::NwgUi;
 use nwg::NativeUi;
+use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use winapi::um::wingdi::{
     CombineRgn, CreatePen, CreatePolygonRgn, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush,
     DeleteObject, FillRgn, FrameRgn, PS_SOLID, RGB, RGN_OR, SelectObject, WINDING,
@@ -43,54 +48,134 @@ pub struct BasicApp {
 impl BasicApp {
     fn main(&self) {
         let sender = self.request_notice.sender();
+        info!("Starting the request thread");
         *self.request_result.borrow_mut() = Some(thread::spawn(move || {
-            let task = || {
-                let upload_form = {
-                    let option = env::args().nth(1).and_then(|p| {
-                        reqwest::blocking::multipart::Form::new()
-                            .file("file", p)
-                            .ok()
-                    });
-
-                    if let Some(form) = option {
-                        form
-                    } else {
-                        return Some(Box::from("the fuck you want"));
-                    }
+            let task = || -> AnyResult<Box<str>> {
+                info!("Getting upload file path");
+                let upload_file_path = if let Some(path) = env::args().nth(1) {
+                    path
+                } else {
+                    warn!("Path arg not specified");
+                    return Ok(Box::from("the fuck you want"));
                 };
 
-                let mut path = env::current_exe().ok()?;
-                path.set_file_name("settings.ini");
-                let conf = ini::Ini::load_from_file(path).ok()?;
-                let apikey = conf.section(Some("Settings"))?.get("APIKEY")?;
+                info!("Getting file metadata");
+                let upload_meta = fs::metadata(&upload_file_path)?;
+                if !upload_meta.is_file() {
+                    warn!("Item specified for checking is not a file");
+                    return Ok(Box::from("bruh this ain a file"));
+                }
+
+                let upload_file = fs::File::open(&upload_file_path)?;
+                let upload_file_hash = {
+                    let mut reader = BufReader::new(&upload_file);
+                    let mut hasher = Sha256::new();
+                    let mut buffer = [0u8; 4096];
+
+                    loop {
+                        let n = reader.read(&mut buffer)?;
+                        if n == 0 {
+                            break;
+                        }
+                        hasher.update(&buffer[..n]);
+                    }
+
+                    hex::encode(&hasher.finalize()[..])
+                };
+
+                info!("Opening settings.ini");
+                let mut settings_path = env::current_exe()?;
+                settings_path.set_file_name("settings.ini");
+                let conf = ini::Ini::load_from_file(settings_path)?;
+                let apikey = conf
+                    .section(Some("Settings"))
+                    .and_then(|v| v.get("APIKEY"))
+                    .context("settings.ini is invalid")?;
 
                 let client = reqwest::blocking::Client::builder()
                     .use_native_tls()
                     .build()
-                    .ok()?;
+                    .context("Failed to build a http client")?;
 
-                // Obtain upload url
+                info!("Trying to get analysis stats by the hash");
                 let response = client
-                    .get("https://www.virustotal.com/api/v3/files/upload_url")
+                    .get(format!(
+                        "https://www.virustotal.com/api/v3/files/{upload_file_hash}"
+                    ))
                     .header("accept", "application/json")
                     .header("x-apikey", apikey)
-                    .send()
-                    .ok()?;
-                let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
-                let upload_url = v.get("data")?.as_str()?;
+                    .send()?;
 
-                // Upload file
+                if response.status().is_success() {
+                    info!("Analysis found by hash");
+                    let v: Value = serde_json::from_str(
+                        &response.text().context("Server sent invalid data")?,
+                    )?;
+                    let msg = v
+                        .get("data")
+                        .and_then(|v| v.get("attributes"))
+                        .and_then(|v| v.get("last_analysis_stats"))
+                        .and_then(|v| serde_json::from_value::<AnalysisStats>(v.to_owned()).ok())
+                        .context("Server sent invalid data")?
+                        .score();
+                    return Ok(Box::from(msg));
+                } else {
+                    info!("Analysis NOT found by hash");
+                }
+
+                info!("Checking file size");
+                // 32MB as specifed by https://docs.virustotal.com/reference/files-scan
+                let upload_url = if upload_meta.len() > 32_000_000 {
+                    info!("File is larger than 32MB, requesting upload url");
+                    let response = client
+                        .get("https://www.virustotal.com/api/v3/files/upload_url")
+                        .header("accept", "application/json")
+                        .header("x-apikey", apikey)
+                        .send()?;
+                    let status = response.status();
+                    if !status.is_success() {
+                        return Err(AnyError::msg(format!(
+                            "Server sent a wrong response: {status}"
+                        )));
+                    }
+                    let v: Value = serde_json::from_str(
+                        &response.text().context("Server sent invalid data")?,
+                    )?;
+                    v.get("data")
+                        .and_then(|v| v.as_str())
+                        .context("Server sent invalid data")?
+                        .to_string()
+                } else {
+                    "https://www.virustotal.com/api/v3/files".to_string()
+                };
+
+                info!("Creating upload form");
+                // TODO change .file to .part with Part::reader
+                let upload_form =
+                    reqwest::blocking::multipart::Form::new().file("file", &upload_file_path)?;
+
+                info!("Uploading the file");
                 let response = client
                     .post(upload_url)
                     .header("accept", "application/json")
                     .header("x-apikey", apikey)
                     .multipart(upload_form)
-                    .send()
-                    .ok()?;
-                let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
-                let analysis_id = v.get("data")?.get("id")?.as_str()?;
+                    .send()?;
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(AnyError::msg(format!(
+                        "Server responded with code: {status}"
+                    )));
+                }
+                let v: Value =
+                    serde_json::from_str(&response.text().context("Server sent invalid data")?)?;
+                let analysis_id = v
+                    .get("data")
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                    .context("Server sent invalid data")?;
 
-                // Get analysis results
+                info!("Waiting for analysis to complete");
                 let response_content = loop {
                     let response = client
                         .get(format!(
@@ -98,60 +183,45 @@ impl BasicApp {
                         ))
                         .header("accept", "application/json")
                         .header("x-apikey", apikey)
-                        .send()
-                        .ok()?;
+                        .send()?;
 
-                    if !response.status().is_success() {
-                        return None;
+                    let status = response.status();
+                    if !status.is_success() {
+                        return Err(AnyError::msg(format!(
+                            "Server sent a wrong response: {status}"
+                        )));
                     }
 
-                    let v: Value = serde_json::from_str(&response.text().ok()?).ok()?;
-                    let status = v.get("data")?.get("attributes")?.get("status")?.as_str()?;
+                    let v: Value = serde_json::from_str(&response.text()?)?;
+                    let status = v
+                        .get("data")
+                        .and_then(|v| v.get("attributes"))
+                        .and_then(|v| v.get("status"))
+                        .and_then(|v| v.as_str())
+                        .context("Server sent invalid data")?;
+                    debug!("Analysis: {status}");
                     if status == "completed" {
                         break v;
                     }
                     sleep(Duration::from_secs(1));
                 };
 
-                #[derive(Default)]
-                struct Agregate {
-                    good: u32,
-                    bad: u32,
-                }
-
-                // Agregate analysis results
-                let agregate = response_content
-                    .get("data")?
-                    .get("attributes")?
-                    .get("results")?
-                    .as_object()?
-                    .values()
-                    .map(|v| {
-                        v.get("category")
-                            .and_then(Value::as_str)
-                            .unwrap_or("type-unsupported")
-                    })
-                    .fold(Agregate::default(), |mut aggr, cat| {
-                        match cat {
-                            "harmless" | "undetected" => aggr.good += 1,
-                            "suspicious" | "malicious" => aggr.bad += 1,
-                            _ => {}
-                        }
-                        aggr
-                    });
-                let bad_ratio = agregate.bad as f64 / (agregate.good + agregate.bad) as f64;
-
-                let msg = if bad_ratio < 0.05 {
-                    "looks fine bro"
-                } else if bad_ratio < 0.1 {
-                    "kinda sus"
-                } else {
-                    "not good"
-                };
-                Some(Box::from(msg))
+                info!("Reading analysis results");
+                let msg = response_content
+                    .get("data")
+                    .and_then(|v| v.get("attributes"))
+                    .and_then(|v| v.get("stats"))
+                    .and_then(|v| serde_json::from_value::<AnalysisStats>(v.to_owned()).ok())
+                    .context("Server sent invalid data")?
+                    .score();
+                Ok(Box::from(msg))
             };
 
-            let result = task().unwrap_or(Box::from("idk"));
+            let result = task().unwrap_or_else(|e| {
+                error!("Encountered an error: {e}");
+                Box::from("idk")
+            });
+            info!("Request thread finished");
             sender.notice();
             result
         }));
@@ -231,8 +301,85 @@ fn build_font() -> Option<nwg::Font> {
     Some(font)
 }
 
+#[derive(Debug, Deserialize)]
+struct AnalysisStats {
+    malicious: u16,
+    suspicious: u16,
+    undetected: u16,
+    harmless: u16,
+    // timeout: u16,
+    // #[serde(rename = "confirmed-timeout")]
+    // confirmed_timeout: u16,
+    // failure: u16,
+    // #[serde(rename = "type-unsupported")]
+    // typ_unsupported: u16,
+}
+
+impl AnalysisStats {
+    fn get_bad_ratio(&self) -> f64 {
+        let good = self.harmless + self.undetected;
+        let bad = self.suspicious + self.malicious;
+        bad as f64 / (good + bad) as f64
+    }
+
+    fn score(&self) -> &'static str {
+        info!("Scoring the analysis results");
+        let bad_ratio = self.get_bad_ratio();
+        if bad_ratio < 0.05 {
+            "looks fine bro"
+        } else if bad_ratio < 0.1 {
+            "kinda sus"
+        } else {
+            "not good"
+        }
+    }
+}
+
+fn start_logger() -> flexi_logger::LoggerHandle {
+    use flexi_logger::{
+        DeferredNow, FileSpec, LogSpecification, Logger, TS_DASHES_BLANK_COLONS_DOT_BLANK,
+        colored_detailed_format,
+    };
+
+    fn release_format(
+        w: &mut dyn Write,
+        now: &mut DeferredNow,
+        record: &Record<'_>,
+    ) -> io::Result<()> {
+        write!(
+            w,
+            "[{}] {:<5} [{}] {}",
+            now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK),
+            record.level(),
+            record.module_path().unwrap_or("<unnamed>"),
+            record.args(),
+        )
+    }
+
+    let logger = Logger::with(LogSpecification::debug()).use_windows_line_ending();
+
+    let logger = if cfg!(debug_assertions) {
+        logger.log_to_stdout().format(colored_detailed_format)
+    } else {
+        logger
+            .log_to_file(
+                FileSpec::default()
+                    .directory(env::current_exe().unwrap().parent().unwrap())
+                    .basename("ahmed")
+                    .use_timestamp(false),
+            )
+            .format(release_format)
+    };
+
+    logger.start().unwrap()
+}
+
 fn main() {
+    let logger_handle = start_logger();
+
     nwg::init().expect("Failed to init Native Windows GUI");
     let _app = BasicApp::build_ui(Default::default()).expect("Failed to build UI");
     nwg::dispatch_thread_events();
+
+    logger_handle.shutdown();
 }
