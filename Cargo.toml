@@ -1,9 +1,9 @@
 [package]
 name = "ask-ahmed"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 license = "MIT"
-authors = ["Tymon Wilczek <tymon.wilczek@gmail.com>"]
+authors = ["Emily Wilczek <emily.wilczek@proton.me>"]
 
 [profile.release]
 codegen-units = 1
